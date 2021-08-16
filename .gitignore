@@ -1,0 +1,16 @@
+*.gz
+*.pyc
+*.pt
+*.gif
+*.png
+*.pdf
+
+qaml.egg-info/
+data/
+qaml/examples/
+
+examples/workbench.py
+
+build/
+
+dist/

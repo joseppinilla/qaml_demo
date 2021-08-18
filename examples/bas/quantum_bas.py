@@ -17,7 +17,7 @@ import torchvision.transforms as torch_transforms
 M,N = SHAPE = (4,4)
 DATA_SIZE = N*M
 HIDDEN_SIZE = 16
-EPOCHS = 75
+EPOCHS = 600
 SAMPLES = 1000
 BATCH_SIZE = 500
 # Stochastic Gradient Descent
@@ -45,17 +45,18 @@ plt.tight_layout()
 rbm = qaml.nn.RBM(DATA_SIZE,HIDDEN_SIZE)
 
 # Initialize biases
-torch.nn.init.uniform_(rbm.b,-0.1,0.1)
-torch.nn.init.uniform_(rbm.c,-0.1,0.1)
-torch.nn.init.uniform_(rbm.W,-0.1,0.1)
+torch.nn.init.constant_(rbm.b,0.5)
+torch.nn.init.zeros_(rbm.c)
+torch.nn.init.uniform_(rbm.W,-0.5,0.5)
 
 # Set up optimizers
 optimizer = torch.optim.SGD(rbm.parameters(), lr=learning_rate,
                             weight_decay=weight_decay,momentum=momentum)
 
 # Set up training mechanisms
+beta = 2.5
 solver_name = "Advantage_system1.1"
-qa_sampler = qaml.sampler.QASampler(rbm,solver=solver_name,beta=2.5)
+qa_sampler = qaml.sampler.QASampler(rbm,solver=solver_name,beta=beta)
 
 # Loss and autograd
 CD = qaml.autograd.SampleBasedConstrastiveDivergence()
@@ -104,12 +105,31 @@ for t in range(EPOCHS):
 # Set the model to evaluation mode
 # rbm.eval()
 
+# %% md
+############################ Store Model and Logs ##############################
+torch.save(rbm,"quantum_rbm.pt")
+torch.save(b_log,"quantum_b.pt")
+torch.save(c_log,"quantum_c.pt")
+torch.save(W_log,"quantum_W.pt")
+torch.save(err_log,"quantum_err.pt")
+torch.save(dict(qa_sampler.embedding),"embedding.pt")
+
+# %% md
+############################ Load Model and Logs ###############################
+rbm = torch.load("quantum_rbm.pt")
+b_log = torch.load("quantum_b.pt")
+c_log = torch.load("quantum_c.pt")
+W_log = torch.load("quantum_W.pt")
+err_log = torch.load("quantum_err.pt")
+embedding = torch.load("embedding.pt")
+qa_sampler = qaml.sampler.QASampler(rbm,solver=solver_name,beta=beta,embedding=embedding)
+
 # %%
 ################################# qBAS Score ###################################
-N = 1000 # CLASSICAL
+num_samples = 1000 # CLASSICAL
 gibbs_sampler = qaml.sampler.GibbsNetworkSampler(rbm)
-prob_v,_ = gibbs_sampler(torch.rand(N,DATA_SIZE),k=10)
-img_samples = prob_v.view(N,*SHAPE).bernoulli()
+prob_v,_ = gibbs_sampler(torch.rand(num_samples,DATA_SIZE),k=10)
+img_samples = prob_v.view(num_samples,*SHAPE).bernoulli()
 # PLot some samples
 fig,axs = plt.subplots(4,5)
 for ax,img in zip(axs.flat,img_samples):
@@ -177,7 +197,6 @@ plt.savefig("quantum_W_log.pdf")
 
 # %%
 ################################## ENERGY ######################################
-
 data_energies = []
 for img,label in train_dataset:
     data = img.flatten(1)
@@ -208,23 +227,40 @@ plot_data = [(data_energies,  'Data',    'blue'),
 hist_kwargs = {'ec':'k','lw':2.0,'alpha':0.5,'histtype':'stepfilled','bins':100}
 weights = lambda data: [1./len(data) for _ in data]
 
+fig, ax = plt.subplots(figsize=(15,10))
 for data,name,color in plot_data:
-    plt.hist(data,weights=weights(data),label=name,color=color,**hist_kwargs)
+    ax.hist(data,weights=weights(data),label=name,color=color,**hist_kwargs)
 
 plt.xlabel("Energy")
 plt.ylabel("Count/Total")
 plt.legend(loc='upper right')
 plt.savefig("quantum_energies.pdf")
 
+# %%
 ################################## VISUALIZE ###################################
-plt.matshow(rbm.b.detach().view(*SHAPE), cmap='viridis')
+plt.matshow(rbm.b.detach().view(*SHAPE))
 plt.colorbar()
+plt.savefig("quantum_b.pdf")
+plt.matshow(rbm.c.detach().view(1,HIDDEN_SIZE))
+plt.yticks([])
+plt.colorbar()
+plt.savefig("quantum_c.pdf")
 
 fig,axs = plt.subplots(HIDDEN_SIZE//4,4)
 for i,ax in enumerate(axs.flat):
     weight_matrix = rbm.W[i].detach().view(*SHAPE)
-    ms = ax.matshow(weight_matrix, cmap='viridis', vmin=-1, vmax=1)
+    ms = ax.matshow(weight_matrix)
     ax.axis('off')
 fig.subplots_adjust(wspace=0.1, hspace=0.1)
 cbar = fig.colorbar(ms, ax=axs.ravel().tolist(), shrink=0.95)
 plt.savefig("quantum_weights.pdf")
+
+# %%
+########################### Check parameter range ##############################
+h_range = qa_sampler.properties['h_range']
+J_range = qa_sampler.properties['extended_j_range']
+target_ising = qa_sampler.embed_bqm().spin
+linear = target_ising.linear.values()
+quad = target_ising.quadratic.values()
+print(f"Linear range [{min(linear):.2} <> {max(linear):.2}] @ device={h_range}")
+print(f"Quadratic range [{min(quad):.2} <> {max(quad):.2}] @ device={J_range}")

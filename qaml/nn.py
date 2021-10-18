@@ -49,11 +49,11 @@ class RestrictedBoltzmannMachine(BoltzmannMachine):
     def __init__(self, V, H):
         super(RestrictedBoltzmannMachine, self).__init__(V,H)
         # Visible linear bias
-        self.b = torch.nn.Parameter(torch.ones(V)*0.5, requires_grad=True)
+        self.b = torch.nn.Parameter(torch.ones(V)*0.5,requires_grad=True)
         # Hidden linear bias
-        self.c = torch.nn.Parameter(torch.ones(H)*0.5, requires_grad=True)
+        self.c = torch.nn.Parameter(torch.ones(H)*0.5,requires_grad=True)
         # Visible-Hidden quadratic bias
-        self.W = torch.nn.Parameter(torch.randn(H, V)*0.1, requires_grad=True)
+        self.W = torch.nn.Parameter(torch.randn(H, V)*0.1,requires_grad=True)
 
     @property
     def matrix(self):
@@ -70,6 +70,7 @@ class RestrictedBoltzmannMachine(BoltzmannMachine):
         """Sample from hidden. P(H) = σ(VW^T + c)"""
         return torch.sigmoid(F.linear(visible, self.W, self.c)*scale)
 
+    @torch.no_grad()
     def energy(self, visible, hidden, scale=1.0):
         """Compute the Energy of a state or batch of states.
                 E(v,h) = -bV - cH - VW^TH
@@ -84,6 +85,7 @@ class RestrictedBoltzmannMachine(BoltzmannMachine):
         # sum_j((D,H)) -> (D,1)
         return -scale*(linear + torch.sum(quadratic,dim=-1))
 
+    @torch.no_grad()
     def free_energy(self, visible, scale=1.0):
         """Also called "effective energy", this expression differs from energy
         in that the compounded contributions of the hidden units is added to the
@@ -103,22 +105,30 @@ class RestrictedBoltzmannMachine(BoltzmannMachine):
 
         return -scale*(first_term + second_term)
 
+    @torch.no_grad()
+    def partition_function(self, scale=1.0):
+        """Compute the partition function"""
+        sequence = torch.tensor([0.,1.],requires_grad=False).repeat(self.H,1)
+        h_iter = torch.cartesian_prod(*sequence)
+        first_term = torch.matmul(scale*self.c.T,h_iter.T).exp()
+        second_term = (1+(scale*F.linear(h_iter,self.W.T,self.b)).exp()).prod(1)
+        return (first_term*second_term).sum()
+
+    @torch.no_grad()
     def log_likelihood(self, *tensors, scale=1.0):
-        """ Compute the log-likelihood for a state or iterable of states
-            Warning: This function computes the partition function.
+        """Compute the log-likelihood for a state or iterable of states
+        Warning: This function computes the partition function.
         """
         # Model
-        N = self.V+self.H
-        sequence = torch.tensor([0.,1.],requires_grad=False).repeat(N,1)
-        all_states = torch.cartesian_prod(*sequence).split([self.V,self.H],1)
-        model_energies = self.energy(*all_states,scale=scale)
-        model_term = torch.exp(-model_energies).sum().log()
+        sequence = torch.tensor([0.,1.],requires_grad=False).repeat(self.H,1)
+        h_iter = torch.cartesian_prod(*sequence)
+        first_term = torch.matmul(scale*self.c.T,h_iter.T).exp()
+        second_term = (1+(scale*F.linear(h_iter,self.W.T,self.b)).exp()).prod(1)
+        model_term = (first_term*second_term).sum().log()
         # Data
-        h_sequence = torch.tensor([0.,1.],requires_grad=False).repeat(self.H,1)
-        h_product = torch.cartesian_prod(*h_sequence)
         for visible in tensors:
-            v_sequence = visible.repeat(len(h_product),1)
-            data_energies = self.energy(v_sequence,h_product,scale=scale)
+            v_sequence = visible.repeat(len(h_iter),1)
+            data_energies = self.energy(v_sequence,h_iter,scale=scale)
             data_term = torch.exp(-data_energies).sum().log()
             yield (data_term - model_term).item()
 

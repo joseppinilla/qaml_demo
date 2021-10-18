@@ -1,3 +1,4 @@
+import copy
 import torch
 import dimod
 import warnings
@@ -6,6 +7,11 @@ import dwave.system
 import dwave.embedding
 
 import numpy as np
+import networkx as nx
+import dwave_networkx as dnx
+
+from dimod.vartypes import as_vartype
+from minorminer.utils.polynomialembedder import processor
 
 class NetworkSampler(torch.nn.Module):
     r""" Sample generator for the probabilistic model provided.
@@ -14,8 +20,8 @@ class NetworkSampler(torch.nn.Module):
         beta (float, optional): Inverse temperature for the distribution.
     """
 
-    scalar : float
-    beta : float # Inverse-temperature
+    beta : float # Inverse-temperature to match sampler
+    scalar : float # Scaling factor to fit sampler's range
 
     def __init__(self, model, beta=1.0):
         super(NetworkSampler, self).__init__()
@@ -31,27 +37,6 @@ class NetworkSampler(torch.nn.Module):
             self.register_buffer('beta', beta)
         else:
             self.beta = beta
-
-    @property
-    def binary_quadratic_model(self):
-        bias_v = self.model.b.data.numpy()
-        bias_h = self.model.c.data.numpy()
-        W = self.model.W.data.numpy()
-        V = self.model.V
-
-        lin_V = {i: -b.item() for i,b in enumerate(bias_v)}
-        lin_H = {j: -c.item() for j,c in enumerate(bias_h)}
-        linear = {**lin_V,**{V+j: c for j,c in lin_H.items()}}
-
-        # Values from RBM are for QUBO formulation i.e. BINARY [0,1]
-        quadratic = {}
-        for i in lin_V:
-            for j in lin_H:
-                weight = -W[j][i].item()
-                if weight == 0: continue
-                quadratic[(i,V+j)] = weight
-
-        return dimod.BinaryQuadraticModel(linear,quadratic,'BINARY')
 
     def sample_visible(self):
         try:
@@ -77,148 +62,242 @@ class PersistentGibbsNetworkSampler(NetworkSampler):
                 match the batch size.
 
     """
-    def __init__(self, model, num_chains):
-        super(PersistentGibbsNetworkSampler, self).__init__(model)
+    def __init__(self, model, num_chains, beta=1.0):
+        super(PersistentGibbsNetworkSampler, self).__init__(model,beta)
         self.prob_v.data = torch.rand(num_chains,model.V)
 
     def forward(self, num_samples, k=1, init=None):
-        prob_vk = self.prob_v if init is None else init
-        prob_hk = self.model(prob_vk)
+        beta = self.beta
+        prob_vk = self.prob_v.clone() if init is None else init.clone()
+        prob_hk = self.prob_h.clone()
 
         for _ in range(k):
-            prob_vk.data = self.model.generate(prob_hk)
-            prob_hk = self.model.forward(prob_vk.bernoulli())
+            prob_hk.data = self.model.forward(prob_vk.bernoulli(),scale=beta)
+            prob_vk.data = self.model.generate(prob_hk.bernoulli(),scale=beta)
 
-        self.prob_v.data = prob_vk
-        self.prob_h.data = prob_hk
+        self.prob_v.data = prob_vk.data
+        self.prob_h.data = prob_hk.data
         return prob_vk[:num_samples], prob_hk[:num_samples]
 
 class GibbsNetworkSampler(NetworkSampler):
 
-    def __init__(self, model):
-        super(GibbsNetworkSampler, self).__init__(model)
+    def __init__(self, model, beta=1.0):
+        super(GibbsNetworkSampler, self).__init__(model,beta)
 
     def forward(self, v0, k=1):
+        beta = self.beta
         prob_vk = v0.clone()
-        prob_hk = self.model(prob_vk)
+        prob_hk = self.prob_h.clone()
 
         for _ in range(k):
-            prob_vk.data = self.model.generate(prob_hk)
-            prob_hk.data = self.model.forward(prob_vk.bernoulli())
+            prob_hk.data = self.model.forward(prob_vk.bernoulli(),scale=beta)
+            prob_vk.data = self.model.generate(prob_hk.bernoulli(),scale=beta)
 
         self.prob_v.data = prob_vk.data
         self.prob_h.data = prob_hk.data
         return prob_vk, prob_hk
 
-class SimulatedAnnealingNetworkSampler(NetworkSampler,dimod.SimulatedAnnealingSampler):
+""" The next samplers formulate the model as a Binary Quadratic Model (BQM) """
+class BinaryQuadraticModelSampler(NetworkSampler):
 
+    _qubo = None
+    _ising = None
+    _networkx_graph = None
+
+    sampleset = None
+
+    def __init__(self, model, beta=1.0):
+        super(BinaryQuadraticModelSampler, self).__init__(model,beta)
+
+    def to_qubo(self):
+        bias_v = self.model.b.data.numpy()
+        bias_h = self.model.c.data.numpy()
+        W = self.model.W.data.detach().clone()
+        V = self.model.V
+        # Linear biases
+        lin_V = {i: -float(b) for i,b in enumerate(bias_v)}
+        lin_H = {j: -float(c) for j,c in enumerate(bias_h)}
+        linear = {**lin_V,**{V+j: c for j,c in lin_H.items()}}
+
+        # To prune BQM from mask
+        mask = self.model.state_dict().get('W_mask',torch.ones_like(W))
+
+        # Quadratic weights
+        quadratic = {}
+        for i in lin_V:
+            for j in lin_H:
+                if mask[j][i]:
+                    quadratic[(i,V+j)] = -float(W[j][i])
+
+        self._qubo = dimod.BinaryQuadraticModel(linear,quadratic,'BINARY')
+        return self._qubo
+
+    @property
+    def qubo(self):
+        if self._qubo is None:
+            return self.to_qubo()
+        else:
+            return self._qubo
+
+    def to_ising(self):
+        """When converting a Boltzmann Machine (BM) model to Ising, first
+        formulate as Quadratic Unconstrained Binary Optimization (QUBO) and then
+        transform to Ising."""
+        self._ising = self.to_qubo().change_vartype('SPIN',inplace=False)
+        return self._ising
+
+    @property
+    def ising(self):
+        if self._ising is None:
+            return self.to_ising()
+        else:
+            return self._ising
+
+    def to_networkx_graph(self):
+        self._networkx_graph = self.bqm.to_networkx_graph()
+        return self._networkx_graph
+
+    @property
+    def networkx_graph(self):
+        if self._networkx_graph is None:
+            return self.to_networkx_graph()
+        else:
+            return self._networkx_graph
+
+BQMSampler = BinaryQuadraticModelSampler
+
+class SimulatedAnnealingNetworkSampler(dimod.SimulatedAnnealingSampler,
+                                       BinaryQuadraticModelSampler):
     sa_kwargs = {"num_sweeps":1000}
 
-    def __init__(self, model):
-        NetworkSampler.__init__(self,model)
+    def __init__(self, model, beta=1.0):
+        BinaryQuadraticModelSampler.__init__(self,model,beta)
         dimod.SimulatedAnnealingSampler.__init__(self)
 
     def forward(self, num_reads=100, **kwargs):
-        bqm = self.binary_quadratic_model
+        bqm = self.to_qubo()
+        bqm.scale(float(self.beta))
         sa_kwargs = {**self.sa_kwargs,**kwargs}
         sampleset = self.sample(bqm,num_reads=num_reads,**sa_kwargs)
-
-        sampletensor = torch.Tensor(sampleset.record.sample.copy())
+        samples = sampleset.record.sample.copy()
+        sampletensor = torch.tensor(samples,dtype=torch.float32)
         samples_v,samples_h = sampletensor.split([self.model.V,self.model.H],1)
 
+        self.sampleset = sampleset
         return samples_v, samples_h
 
-class ExactNetworkSampler(NetworkSampler,dimod.ExactSolver):
+SASampler = SimulatedAnnealingNetworkSampler
 
-    def __init__(self, model):
-        NetworkSampler.__init__(self,model)
+class ExactNetworkSampler(dimod.ExactSolver,BinaryQuadraticModelSampler):
+
+    def __init__(self, model, beta=1.0):
+        BinaryQuadraticModelSampler.__init__(self,model,beta)
         dimod.ExactSolver.__init__(self)
 
     def forward(self, num_reads=100, **ex_kwargs):
         beta = self.beta
-        bqm = self.binary_quadratic_model
-        solutions = self.sample(bqm,**ex_kwargs)
+        bqm = self.to_qubo()
 
-        Z = sum(np.exp(-beta*E) for E in solutions.record['energy'])
-        P = torch.Tensor([np.exp(-beta*E)/Z for E in solutions.record['energy']])
-        samples = [solutions.record['sample'][i] for i in torch.multinomial(P,num_reads,replacement=True)]
+        solutions = self.sample(bqm,**ex_kwargs)
+        energies = solutions.record['energy']
+        Z = np.exp(-beta*energies).sum()
+        P = torch.Tensor(np.exp(-beta*energies/Z))
+        samples = [solutions.record['sample'][i]
+                   for i in torch.multinomial(P,num_reads,replacement=True)]
 
         sampletensor = torch.Tensor(samples)
         samples_v,samples_h = sampletensor.split([self.model.V,self.model.H],1)
 
+        self.sampleset = solutions
         return samples_v, samples_h
 
-class QuantumAnnealingNetworkSampler(NetworkSampler,dwave.system.DWaveSampler):
-
+class QuantumAnnealingNetworkSampler(dwave.system.DWaveSampler,
+                                     BinaryQuadraticModelSampler):
     sample_kwargs = {"answer_mode":'raw',
                      "num_spin_reversal_transforms":0,
-                     "anneal_schedule":[(0.0,0.0),(0.5,0.5),(10.5,0.5),(11.0,1.0)],
+                     "anneal_schedule":[(0.0,0.0),(0.6,0.6),(10.6,0.6),(11.0,1.0)],
                      "auto_scale":False}
 
-    embed_kwargs = {"chain_strength":1.6}
+    embed_kwargs = {"chain_strength":1.2}
 
     unembed_kwargs = {"chain_break_fraction":False,
                       "chain_break_method":dwave.embedding.chain_breaks.majority_vote}
 
-    def __init__(self, model, embedding=None, beta=1.0,
-                 failover=False, retry_interval=-1, **config):
-        NetworkSampler.__init__(self,model,beta=beta)
+    embedding = None
+    target_bqm = None
+    target_sampleset = None
+
+    def __init__(self, model, embedding=None, beta=1.0, failover=False,
+                 retry_interval=-1, **config):
+        BinaryQuadraticModelSampler.__init__(self,model,beta=beta)
         dwave.system.DWaveSampler.__init__(self,failover,retry_interval,**config)
-        self.networkx_graph = self.to_networkx_graph()
-        self.sampleset = None
         if embedding is None:
             if 'Restricted' in repr(self.model):
                 cache = minorminer.busclique.busgraph_cache(self.networkx_graph)
                 embedding = cache.find_biclique_embedding(model.V,model.H)
             else:
-                S = self.binary_quadratic_model.quadratic
+                S = self.bqm.quadratic
                 embedding = minorminer.find_embedding(S,self.networkx_graph)
+            if not embedding:
+                warnings.warn("Embedding not found")
         if not isinstance(embedding,dwave.embedding.EmbeddedStructure):
-            self.embedding = dwave.embedding.EmbeddedStructure(self.networkx_graph.edges,embedding)
-        else:
-            self.embedding = embedding
+            edgelist = self.networkx_graph.edges
+            embedding = dwave.embedding.EmbeddedStructure(edgelist,embedding)
+        self.embedding = embedding
         self.scalar = 1.0
 
+    def to_networkx_graph(self):
+        self._networkx_graph = dwave.system.DWaveSampler.to_networkx_graph(self)
+        return self._networkx_graph
+
     def embed_bqm(self, visible=None, hidden=None, auto_scale=False, **kwargs):
+        bqm = self.to_ising().copy()
         embedding = self.embedding
-        bqm = self.binary_quadratic_model
         embed_kwargs = {**self.embed_kwargs,**kwargs}
 
+        target_bqm = self.embedding.embed_bqm(bqm,**embed_kwargs)
+        ignoring = [e for u in embedding for e in embedding.chain_edges(u)]
+        scale_args = {'ignored_interactions':ignoring}
         if auto_scale:
             # Same as target auto_scale but retains scalar
-            norm_args = {'bias_range':self.properties['h_range'],
-                         'quadratic_range':self.properties['j_range']}
-            self.scalar = bqm.normalize(**norm_args)
+            scale_args.update({'bias_range':self.properties['h_range'],
+                               'quadratic_range':self.properties['j_range']})
+            self.scalar = target_bqm.normalize(**scale_args)
         else:
-            bqm.scale(1.0/float(self.beta))
-
-        target_bqm = self.embedding.embed_bqm(bqm, **embed_kwargs)
+            target_bqm.scale(1.0/float(self.beta),**scale_args)
 
         return target_bqm
 
-    def unembed_sampleset(self,**kwargs):
+    def sample_and_change(self, **kwargs):
+        sample_kwargs = {**self.sample_kwargs,**kwargs}
+        sampleset = dwave.system.DWaveSampler.sample(self,self.target_bqm,
+                                                        **sample_kwargs)
+        sampleset.record.sample = (sampleset.record.sample+1)//2
+        sampleset._vartype = as_vartype('BINARY')
+        # sampleset.change_vartype('BINARY',inplace=True) # Doesn't work?
+        return sampleset
+
+    def unembed_sampleset(self, **kwargs):
         unembed_kwargs = {**self.unembed_kwargs,**kwargs}
 
-        sampleset = dwave.embedding.unembed_sampleset(self.sampleset,
-                                                      self.embedding,
-                                                      self.binary_quadratic_model,
+        sampleset = dwave.embedding.unembed_sampleset(self.target_sampleset,
+                                                      self.embedding,self.qubo,
                                                       **unembed_kwargs)
         return sampleset
 
     def forward(self, num_reads, visible=None, hidden=None, auto_scale=False,
                 embed_kwargs={}, unembed_kwargs={}, **kwargs):
 
-        sample_kwargs = {**self.sample_kwargs,**kwargs}
-        embed_kwargs = {**self.embed_kwargs,**embed_kwargs}
+        embed_kwargs = {**self.embed_kwargs,**embed_kwargs,'auto_scale':auto_scale}
+        sample_kwargs = {**self.sample_kwargs,**kwargs,'num_reads':num_reads}
         unembed_kwargs = {**self.unembed_kwargs,**unembed_kwargs}
 
-        target_bqm = self.embed_bqm(visible,hidden,auto_scale,**embed_kwargs)
+        self.target_bqm = self.embed_bqm(visible,hidden,**embed_kwargs)
+        self.target_sampleset = self.sample_and_change(**sample_kwargs)
+        self.sampleset = self.unembed_sampleset(**unembed_kwargs)
 
-        self.sampleset = self.sample(target_bqm,num_reads=num_reads,**sample_kwargs)
-
-        sampleset = self.unembed_sampleset(**unembed_kwargs)
-
-        sampletensor = torch.tensor(sampleset.record.sample,dtype=torch.float32)
+        samples = self.sampleset.record.sample.copy()
+        sampletensor = torch.tensor(samples,dtype=torch.float32)
         samples_v,samples_h = sampletensor.split([self.model.V,self.model.H],1)
 
         return samples_v, samples_h

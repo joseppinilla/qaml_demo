@@ -31,9 +31,11 @@ class BAS(torch.utils.data.Dataset):
         >>>     ax.axis('off')
     """
 
-    def __init__(self, rows, cols, transform=None, target_transform=None):
-        self.data, self.targets = self.generate_bars_and_stripes(rows,cols)
+    def __init__(self, rows, cols, embed_label=False,
+                 transform=None, target_transform=None):
+        self.data, self.targets = self.generate(rows,cols,embed_label)
         self.transform = transform
+        self.embed_label = embed_label
         self.target_transform = target_transform
 
     def __len__(self):
@@ -101,7 +103,7 @@ class BAS(torch.utils.data.Dataset):
         return precision, recall, score
 
     @classmethod
-    def generate_bars_and_stripes(cls, rows, cols):
+    def generate(cls, rows, cols, embed_label=False):
         """ Generate the full dataset of rows*cols Bars And Stripes (BAS).
         Args:
             cols (int): number of columns in the generated images
@@ -135,13 +137,22 @@ class BAS(torch.utils.data.Dataset):
                                          stripes[1:]), # ignore all zeros
                                          axis=0),dtype='float32')
 
-        # Create labels synthetically
-        labels  = [0] # All zeros
-        labels += [1]*(2**cols-2) # Bars
-        labels += [2]*(2**rows-2) # Stripes
-        labels += [3] # All ones
-
-        return data, np.asarray(labels,dtype='float32')
+        if embed_label:
+            labels  = [(0,0)] # All zeros
+            labels += [(0,1)]*(2**cols-2) # Bars
+            labels += [(1,0)]*(2**rows-2) # Stripes
+            labels += [(1,1)] # All ones
+            targets = np.asarray(labels,dtype='float32')
+            data[:,-2,-1] = targets[:,0]
+            data[:,-1,-1] = targets[:,1]
+            return data, targets
+        else:
+            # Create labels synthetically
+            labels  = [0] # All zeros
+            labels += [1]*(2**cols-2) # Bars
+            labels += [2]*(2**rows-2) # Stripes
+            labels += [3] # All ones
+            return data, np.asarray(labels,dtype='float32')
 
 class OptDigits(torchvision.datasets.vision.VisionDataset):
     """ Based on the MNIST Dataset implementation, but enough differences to not

@@ -13,6 +13,7 @@ import torchvision.transforms as torch_transforms
 # H is hidden dimension
 N, D_in, H, D_out = 64, 784, 128, 10
 
+# %%
 ################################# Hyperparameters ##############################
 EPOCHS = 20
 BATCH_SIZE = 64
@@ -23,6 +24,7 @@ momentum = 0.5
 # Contrastive Divergence (CD-k)
 cd_k = 1
 
+# %%
 #################################### Input Data ################################
 train_dataset = torch_datasets.MNIST(root='./data/', train=True,
                                      transform=torch_transforms.ToTensor(),
@@ -35,6 +37,7 @@ test_dataset = torch_datasets.MNIST(root='./data/', train=False,
                                     download=True)
 test_loader = torch.utils.data.DataLoader(test_dataset)
 
+# %%
 ################################## Model Training ##############################
 model = torch.nn.Sequential(torch.nn.Linear(D_in, H),
                             torch.nn.ReLU(),

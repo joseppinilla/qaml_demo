@@ -1,3 +1,5 @@
+# %%
+# Required packages
 import qaml
 import torch
 
@@ -6,6 +8,7 @@ import matplotlib.pyplot as plt
 import torchvision.datasets as torch_datasets
 import torchvision.transforms as torch_transforms
 
+# %%
 ################################# Hyperparameters ##############################
 EPOCHS = 5
 BATCH_SIZE = 64
@@ -14,6 +17,7 @@ learning_rate = 1e-3
 weight_decay = 1e-4
 momentum = 0.5
 
+# %%
 #################################### Input Data ################################
 train_dataset = torch_datasets.MNIST(root='./data/', train=True,
                                      transform=torch_transforms.ToTensor(),
@@ -32,6 +36,7 @@ test_dataset = torch_datasets.MNIST(root='./data/', train=False,
                                     download=True)
 test_loader = torch.utils.data.DataLoader(test_dataset)
 
+# %%
 ################################# Model Definition #############################
 DATA_SIZE = len(train_dataset.data[0].flatten())
 LABEL_SIZE = len(train_dataset.classes)

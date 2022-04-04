@@ -49,11 +49,11 @@ class RestrictedBoltzmannMachine(BoltzmannMachine):
     def __init__(self, V, H):
         super(RestrictedBoltzmannMachine, self).__init__(V,H)
         # Visible linear bias
-        self.b = torch.nn.Parameter(torch.ones(V)*0.5,requires_grad=True)
+        self.b = torch.nn.Parameter(torch.randn(V)*0.1,requires_grad=True)
         # Hidden linear bias
-        self.c = torch.nn.Parameter(torch.ones(H)*0.5,requires_grad=True)
+        self.c = torch.nn.Parameter(torch.randn(H)*0.1,requires_grad=True)
         # Visible-Hidden quadratic bias
-        self.W = torch.nn.Parameter(torch.randn(H, V)*0.1,requires_grad=True)
+        self.W = torch.nn.Parameter(torch.randn(H,V)*0.1,requires_grad=True)
 
     @property
     def matrix(self):

@@ -1,6 +1,6 @@
 # %% markdown
 # # Quantum-Assisted RBM training on the BAS Dataset for Reconstruction
-# This is an example on quantum-assisted training of an RBM on the BAS(4,4)
+# This is an example on quantum-assisted training of an RBM on the BAS(8,8)
 # dataset.
 # Developed by: Jose Pinilla
 # %%
@@ -120,11 +120,11 @@ fig, ax = plt.subplots()
 plt.plot(accuracy_log)
 plt.ylabel("Testing Accuracy")
 plt.xlabel("Epoch")
-plt.savefig("classical_accuracy.pdf")
+plt.savefig("quantum_accuracy.pdf")
 
 # L1 error graph
 fig, ax = plt.subplots()
 plt.plot(err_log)
 plt.ylabel("Reconstruction Error (L1)")
 plt.xlabel("Epoch")
-plt.savefig("classical_err_log.pdf")
+plt.savefig("quantum_err_log.pdf")

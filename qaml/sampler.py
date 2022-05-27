@@ -290,7 +290,7 @@ class ExactEmbeddedNetworkSampler(BinaryQuadraticModelSampler):
 
 class QuantumAnnealingNetworkSampler(BinaryQuadraticModelSampler):
 
-    sample_kwargs = {"annealing_time":20.0,"label":"QARBM"}
+    sample_kwargs = {"annealing_time":20.0,"label":"QARBM-DEV"}
 
     embed_kwargs = {"chain_strength":1.6}
 

@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/396951492.svg)](https://zenodo.org/badge/latestdoi/396951492)
+
 # Quantum Assisted Machine Learning
 QAML is a library for generative learning models built as an extension of PyTorch.
 This library provides a set of custom Pytorch classes based on Pytorch `Module`, `Function`, and `Dataset` to allow easy
